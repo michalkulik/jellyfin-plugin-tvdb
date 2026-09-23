@@ -1,0 +1,129 @@
+name: Fork / Plugin Release
+
+# Builds the plugin and publishes a Jellyfin plugin repository (ZIP + manifest.json) as a GitHub
+# release, so the fork can be added to a Jellyfin server as an extra plugin repository:
+#
+#   https://github.com/michalkulik/jellyfin-plugin-tvdb/releases/latest/download/manifest.json
+#
+# Create a release by pushing a tag (for example `v24.0.0.1`) or by running this workflow manually
+# with a version. The plugin's own metadata (guid, name, category, target ABI) comes from
+# build.yaml, the version comes from the tag.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to build, without the "v" prefix (for example 24.0.0.1)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Determine version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+
+          if [ -z "$VERSION" ]; then
+            echo "::error::Unable to determine the version to build"
+            exit 1
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Build plugin
+        run: |
+          dotnet build Jellyfin.Plugin.Tvdb/Jellyfin.Plugin.Tvdb.csproj \
+            -c Release \
+            --nologo \
+            "-p:PluginVersion=${{ steps.version.outputs.version }}" \
+            -p:CopyLocalLockFileAssemblies=true
+
+      # A Release build is only useful if the version really made it into the assembly, so this
+      # fails the run instead of publishing a package that claims the wrong version.
+      - name: Verify the built version
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          DLL="Jellyfin.Plugin.Tvdb/bin/Release/net10.0/Jellyfin.Plugin.Tvdb.dll"
+
+          if ! strings -a "$DLL" | grep -qF "$VERSION"; then
+            echo "::error::The assembly does not contain version $VERSION"
+            exit 1
+          fi
+
+          echo "Assembly carries version $VERSION"
+
+      - name: Build the plugin repository
+        run: |
+          pip install --quiet pyyaml
+          python3 tools/build-plugin-repo.py \
+            --version "${{ steps.version.outputs.version }}" \
+            --output dist
+
+      - name: Show the generated manifest
+        run: |
+          cat dist/manifest.json
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          TAG="v$VERSION"
+
+          NOTES=$(cat <<EOF
+          Fork build of TheTVDB for Jellyfin 12, published as a plugin repository.
+
+          Version: \`$VERSION\`
+          Commit: \`$GITHUB_SHA\`
+
+          ### Add it to Jellyfin
+
+          Dashboard -> Plugins -> Repositories -> add a repository with this URL:
+
+          \`\`\`
+          https://github.com/${{ github.repository }}/releases/latest/download/manifest.json
+          \`\`\`
+
+          Then install **TheTVDB** from the catalogue. The plugin keeps the upstream GUID, so it
+          replaces the official build (same configuration and metadata links) instead of sitting
+          next to it.
+          EOF
+          )
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --notes "$NOTES"
+
+            # Drop assets from earlier runs so only the current build remains.
+            for asset in $(gh release view "$TAG" --json assets --jq '.assets[].name'); do
+              gh release delete-asset "$TAG" "$asset" --yes
+            done
+          else
+            gh release create "$TAG" \
+              --title "$TAG" \
+              --notes "$NOTES" \
+              --target "$GITHUB_SHA"
+          fi
+
+          gh release upload "$TAG" dist/*.zip dist/manifest.json --clobber

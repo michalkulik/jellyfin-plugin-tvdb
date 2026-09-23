@@ -1,7 +1,12 @@
 <Project>
     <PropertyGroup>
-        <Version>24.0.0.0</Version>
-        <AssemblyVersion>24.0.0.0</AssemblyVersion>
-        <FileVersion>24.0.0.0</FileVersion>
+        <!-- Single source of truth for the build version. The fork's release workflow overrides it
+             with "-p:PluginVersion=<tag>", so a plain build stays on the checked-in value. The
+             revision part is the fork's own counter: upstream 24.0.0.0 plus fork build 1 is
+             24.0.0.1, which sorts above the official build in Jellyfin's plugin list. -->
+        <PluginVersion Condition="'$(PluginVersion)' == ''">24.0.0.1</PluginVersion>
+        <Version>$(PluginVersion)</Version>
+        <AssemblyVersion>$(PluginVersion)</AssemblyVersion>
+        <FileVersion>$(PluginVersion)</FileVersion>
     </PropertyGroup>
 </Project>
